@@ -18,6 +18,8 @@ import (
 type resourceCapableMockServer struct {
 	cfg               config.MCPServer
 	supportsResources bool
+	supportedVersions []string
+	tools             []mcp.Tool
 }
 
 func (m *resourceCapableMockServer) Stop()           {}
@@ -25,7 +27,7 @@ func (m *resourceCapableMockServer) MCPName() string { return m.cfg.Name }
 func (m *resourceCapableMockServer) GetStatus() upstream.ServerValidationStatus {
 	return upstream.ServerValidationStatus{}
 }
-func (m *resourceCapableMockServer) GetManagedTools() []mcp.Tool           { return nil }
+func (m *resourceCapableMockServer) GetManagedTools() []mcp.Tool           { return m.tools }
 func (m *resourceCapableMockServer) GetServedManagedTool(string) *mcp.Tool { return nil }
 func (m *resourceCapableMockServer) GetToolHints(string) (upstream.ToolHints, bool) {
 	return upstream.ToolHints{}, false
@@ -33,8 +35,15 @@ func (m *resourceCapableMockServer) GetToolHints(string) (upstream.ToolHints, bo
 func (m *resourceCapableMockServer) GetManagedPrompts() []mcp.Prompt           { return nil }
 func (m *resourceCapableMockServer) GetServedManagedPrompt(string) *mcp.Prompt { return nil }
 func (m *resourceCapableMockServer) Config() config.MCPServer                  { return m.cfg }
-func (m *resourceCapableMockServer) SupportedVersions() []string               { return nil }
-func (m *resourceCapableMockServer) SupportsVersion(string) bool               { return false }
+func (m *resourceCapableMockServer) SupportedVersions() []string               { return m.supportedVersions }
+func (m *resourceCapableMockServer) SupportsVersion(v string) bool {
+	for _, sv := range m.supportedVersions {
+		if sv == v {
+			return true
+		}
+	}
+	return false
+}
 func (m *resourceCapableMockServer) ToolsCacheMetadata() upstream.CacheMetadata {
 	return upstream.CacheMetadata{}
 }
@@ -81,4 +90,38 @@ func TestBuildRoutingTable_ResourcePrefixSkipConditions(t *testing.T) {
 
 	_, ok = table.LookupResourcePrefix("unsup_template.html")
 	assert.False(t, ok, "server that doesn't support resources must not be resource-routable")
+}
+
+// TestBuildRoutingTable_StatefulFamilyRoutesCalls confirms that an upstream
+// advertising an older 2025 revision (e.g. 2025-03-26) is marked Stateful in
+// the routing table, so the 2025 router actually serves its tool calls
+// (router_202511 refuses when !route.Stateful) — not just lists them.
+func TestBuildRoutingTable_StatefulFamilyRoutesCalls(t *testing.T) {
+	b := &mcpBrokerImpl{
+		logger: slog.Default(),
+		mcpServers: map[config.UpstreamMCPID]upstream.ActiveMCPServer{
+			"older2025": &resourceCapableMockServer{
+				cfg:               config.MCPServer{Name: "older2025", Prefix: "o25_"},
+				supportedVersions: []string{"2025-03-26"},
+				tools:             []mcp.Tool{{Name: "doc"}},
+			},
+			"v2026": &resourceCapableMockServer{
+				cfg:               config.MCPServer{Name: "v2026", Prefix: "v26_"},
+				supportedVersions: []string{"2026-07-28"},
+				tools:             []mcp.Tool{{Name: "thing"}},
+			},
+		},
+	}
+
+	table := b.buildRoutingTable()
+
+	route, ok := table.LookupTool("o25_doc")
+	assert.True(t, ok, "tool from an older-2025 upstream should be routable")
+	assert.True(t, route.Stateful, "older-2025 upstream must be marked Stateful so 2025 calls route")
+	assert.False(t, route.Stateless, "a non-2026 upstream is not on the stateless route")
+
+	route2026, ok := table.LookupTool("v26_thing")
+	assert.True(t, ok)
+	assert.True(t, route2026.Stateless, "2026 upstream is stateless-route")
+	assert.False(t, route2026.Stateful, "a 2026-only upstream is not on the stateful route")
 }
