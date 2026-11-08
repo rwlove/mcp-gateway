@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -134,6 +135,25 @@ func ValidatePrompts(prompts []mcp.Prompt) ([]mcp.Prompt, []InvalidPromptInfo) {
 	return valid, invalid
 }
 
+// stripSchemaDialect removes a top-level pre-2020-12 JSON Schema `$schema`
+// dialect label from a tool schema in place. The MCP TypeScript SDK (zod 4 path)
+// stamps every tool's inputSchema with a draft-07 `$schema`, and some MCP clients
+// (e.g. Claude Code / Claude Desktop) validate tool schemas as JSON Schema
+// 2020-12 only and silently drop any tool that declares an older dialect. The
+// label imposes no constraint of its own, so removing it lets those clients
+// accept the otherwise valid schema. A 2020-12 `$schema` is left intact — it is
+// already what strict clients expect, and conformance requires it to round-trip.
+func stripSchemaDialect(schema any) {
+	m, ok := schema.(map[string]any)
+	if !ok {
+		return
+	}
+	dialect, ok := m["$schema"].(string)
+	if ok && !strings.Contains(dialect, "2020-12") {
+		delete(m, "$schema")
+	}
+}
+
 // ValidateTools validates a list of tools and returns the valid tools and info about invalid ones.
 func ValidateTools(tools []mcp.Tool) ([]mcp.Tool, []InvalidToolInfo) {
 	var valid []mcp.Tool
@@ -144,6 +164,8 @@ func ValidateTools(tools []mcp.Tool) ([]mcp.Tool, []InvalidToolInfo) {
 		if len(info.Errors) > 0 {
 			invalid = append(invalid, info)
 		} else {
+			stripSchemaDialect(tool.InputSchema)
+			stripSchemaDialect(tool.OutputSchema)
 			valid = append(valid, tool)
 		}
 	}

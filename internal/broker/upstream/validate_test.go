@@ -337,3 +337,64 @@ func TestInvalidToolPolicyConstants(t *testing.T) {
 	assert.Equal(t, InvalidToolPolicy("FilterOut"), InvalidToolPolicyFilterOut)
 	assert.Equal(t, InvalidToolPolicy("RejectServer"), InvalidToolPolicyRejectServer)
 }
+
+func TestValidateTools_StripsSchemaDialect(t *testing.T) {
+	// The MCP TypeScript SDK stamps tool schemas with a draft-07 `$schema`,
+	// which 2020-12-only clients reject. ValidateTools must strip a pre-2020-12
+	// dialect from the tools it serves while leaving the tool valid and its
+	// constraints intact.
+	tools := []mcp.Tool{
+		{
+			Name: "stamped_tool",
+			InputSchema: map[string]any{
+				"$schema": "http://json-schema.org/draft-07/schema#",
+				"type":    "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string"},
+				},
+			},
+			OutputSchema: map[string]any{
+				"$schema": "http://json-schema.org/draft-07/schema#",
+				"type":    "object",
+			},
+		},
+	}
+
+	valid, invalid := ValidateTools(tools)
+	assert.Empty(t, invalid)
+	assert.Len(t, valid, 1)
+
+	in := valid[0].InputSchema.(map[string]any)
+	_, hasInputDialect := in["$schema"]
+	assert.False(t, hasInputDialect, "inputSchema draft-07 $schema dialect must be stripped")
+	assert.Equal(t, "object", in["type"], "stripping $schema must leave other keywords intact")
+	assert.Contains(t, in, "properties")
+
+	out := valid[0].OutputSchema.(map[string]any)
+	_, hasOutputDialect := out["$schema"]
+	assert.False(t, hasOutputDialect, "outputSchema draft-07 $schema dialect must be stripped")
+}
+
+func TestValidateTools_Preserves2020_12SchemaDialect(t *testing.T) {
+	// A 2020-12 `$schema` is already what strict clients expect and must be left
+	// intact — stripping it would break clients and MCP conformance that require
+	// the dialect to round-trip.
+	const dialect = "https://json-schema.org/draft/2020-12/schema"
+	tools := []mcp.Tool{
+		{
+			Name: "canonical_tool",
+			InputSchema: map[string]any{
+				"$schema":    dialect,
+				"type":       "object",
+				"properties": map[string]any{"name": map[string]any{"type": "string"}},
+			},
+		},
+	}
+
+	valid, invalid := ValidateTools(tools)
+	assert.Empty(t, invalid)
+	assert.Len(t, valid, 1)
+
+	in := valid[0].InputSchema.(map[string]any)
+	assert.Equal(t, dialect, in["$schema"], "a 2020-12 $schema must be preserved")
+}
